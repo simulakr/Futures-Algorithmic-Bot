@@ -57,14 +57,14 @@ PRICE_PRECISION = {
 # ─── Risk & Kaldıraç ─────────────────────────────────────────────────────────
 
 DEFAULT_LEVERAGE  = 25
-DEFAULT_RISK_USDT = 20
+DEFAULT_RISK_USDT = 10
 
 SYMBOL_SETTINGS = {
-    "BTCUSDT":  {"risk": 20, "leverage": 25},
-    "ETHUSDT":  {"risk": 20, "leverage": 25},
-    "SOLUSDT":  {"risk": 20, "leverage": 25},
-    "XRPUSDT":  {"risk": 20, "leverage": 25},
-    "DOGEUSDT": {"risk": 20, "leverage": 25},
+    "BTCUSDT":  {"risk": 10, "leverage": 25},
+    "ETHUSDT":  {"risk": 10, "leverage": 25},
+    "SOLUSDT":  {"risk": 10, "leverage": 25},
+    "XRPUSDT":  {"risk": 10, "leverage": 25},
+    "DOGEUSDT": {"risk": 10, "leverage": 25},
 }
 
 # ─── TP / SL Çarpanları ───────────────────────────────────────────────────────
