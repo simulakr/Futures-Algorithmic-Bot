@@ -56,15 +56,15 @@ PRICE_PRECISION = {
 
 # ─── Risk & Kaldıraç ─────────────────────────────────────────────────────────
 
-DEFAULT_LEVERAGE  = 20
+DEFAULT_LEVERAGE  = 5 # Subaccount leverage is not greater than 5.
 DEFAULT_RISK_USDT = 10
 
 SYMBOL_SETTINGS = {
-    "BTCUSDT":  {"risk": 10, "leverage": 20},
-    "ETHUSDT":  {"risk": 10, "leverage": 20},
-    "SOLUSDT":  {"risk": 10, "leverage": 20},
-    "XRPUSDT":  {"risk": 10, "leverage": 20},
-    "DOGEUSDT": {"risk": 10, "leverage": 20},
+    "BTCUSDT":  {"risk": 10, "leverage": 5},
+    "ETHUSDT":  {"risk": 10, "leverage": 5},
+    "SOLUSDT":  {"risk": 10, "leverage": 5},
+    "XRPUSDT":  {"risk": 10, "leverage": 5},
+    "DOGEUSDT": {"risk": 10, "leverage": 5},
 }
 
 # ─── TP / SL Çarpanları ───────────────────────────────────────────────────────
