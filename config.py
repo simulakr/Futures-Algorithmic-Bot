@@ -68,5 +68,5 @@ SYMBOL_SETTINGS = {
 }
 
 # ─── TP / SL Çarpanları ───────────────────────────────────────────────────────
-TP_ATR_MULTIPLIER = 6
-SL_ATR_MULTIPLIER = 3
+TP_ATR_MULTIPLIER = 2.5
+SL_ATR_MULTIPLIER = 2.5
