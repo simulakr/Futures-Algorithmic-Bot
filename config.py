@@ -1,4 +1,3 @@
-# 6-3 Go Breakout-Breakdown
 import os
 from dotenv import load_dotenv
 
