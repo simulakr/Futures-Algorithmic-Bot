@@ -86,10 +86,6 @@ def calculate_z(df: pd.DataFrame, symbol: str) -> pd.Series:
 # ─── ATR ZigZag ───────────────────────────────────────────────────────────────
 
 def calculate_atr_zigzag(df: pd.DataFrame, atr_col: str = "atr", atr_mult: float = 1.0, suffix: str = "") -> pd.DataFrame:
-    """
-    ATR tabanlı zigzag pivot noktaları hesaplar.
-    suffix ile aynı DataFrame üzerinde birden fazla kez çalıştırılabilir.
-    """
     closes = df["close"].values
     atrs   = df[atr_col].values
     n      = len(df)
@@ -165,7 +161,6 @@ def calculate_atr_zigzag(df: pd.DataFrame, atr_col: str = "atr", atr_mult: float
         tmp = df[col].replace(0, np.nan).ffill()
         df[f"{col}_ff"] = tmp.fillna(0).astype(int)
 
-    # Pivot bars ago forward fill (sürekli artan)
     filled = []
     last_val = last_idx = None
     for i, v in enumerate(pivot_bars_ago):
@@ -201,6 +196,23 @@ def add_market_structure(df: pd.DataFrame, suffix: str) -> pd.DataFrame:
     return df
 
 
+# ─── Shift Koşulu Yardımcısı ──────────────────────────────────────────────────
+
+def _shift_ok(df: pd.DataFrame, price_col: str, pivot_col: str, direction: str, n: int = 6) -> pd.Series:
+    """
+    Son n mumun hepsinin pivot_col'un direction tarafında olup olmadığını kontrol eder.
+    direction: 'below' → close < pivot, 'above' → close > pivot
+    """
+    conditions = []
+    for i in range(1, n + 1):
+        if direction == "below":
+            cond = (df[pivot_col].notna() & (df[price_col].shift(i) < df[pivot_col])).fillna(False)
+        else:
+            cond = (df[pivot_col].notna() & (df[price_col].shift(i) > df[pivot_col])).fillna(False)
+        conditions.append(cond)
+    return pd.concat(conditions, axis=1).all(axis=1)
+
+
 # ─── Ana Hesaplama ────────────────────────────────────────────────────────────
 
 def calculate_indicators(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
@@ -233,8 +245,8 @@ def calculate_indicators(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
     nw = calculate_nadaraya_watson(df)
     df[["nw", "nw_upper", "nw_lower"]] = nw
 
-    # ATR ZigZag (2x ve 3x)
-    df = calculate_atr_zigzag(df, atr_col="z", atr_mult=2.0, suffix="_2x")
+    # ATR ZigZag — sadece _2x (_3x ileride eklenecek)
+    df = calculate_atr_zigzag(df, atr_col="z", atr_mult=1.5, suffix="_2x")
     df = calculate_atr_zigzag(df, atr_col="z", atr_mult=3.0, suffix="_3x")
 
     # Market Yapısı
@@ -244,29 +256,41 @@ def calculate_indicators(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
     # ATR filtre maskesi
     atr_ok = (atr_low < df["pct_atr"]) & (df["pct_atr"] < atr_high)
 
-    # ─── Pivot Go Sinyalleri ──────────────────────────────────────────────────
+    # Sütun kısayolları
+    hff  = "high_pivot_ff_2x"
+    lff  = "low_pivot_ff_2x"
+    hs   = "high_structure_2x"
+    ls   = "low_structure_2x"
+    hcon = "high_confirmed_2x"
+    lcon = "low_confirmed_2x"
+
+    # Shift koşulları (ortak)
+    long_shift_ok  = _shift_ok(df, "close", hff, "below", n=5)
+    short_shift_ok = _shift_ok(df, "close", lff, "above", n=5)
+
+    # ─── pivot_go_up / pivot_go_down ──────────────────────────────────────────
+    # Pivot teyidi + yapı uyumu + NW filtresi + trend filtresi
 
     df["pivot_go_up_2x"]   = False
     df["pivot_go_down_2x"] = False
 
     df.loc[
-        df["low_confirmed_2x"].astype(bool) &
-        (df["low_structure_2x"]  == "HL") &
-        (df["high_structure_2x"] == "HH") &
-        (df["trend_50_200"]      == "uptrend") &
+        df[lcon].astype(bool) &
+        (df[ls] == "HL") & (df[hs] == "HH") &
+        (df["trend_50_200"] == "uptrend") &
         (df["close"] < df["nw_upper"]) & atr_ok,
         "pivot_go_up_2x",
     ] = True
 
     df.loc[
-        df["high_confirmed_2x"].astype(bool) &
-        (df["high_structure_2x"] == "LH") &
-        (df["low_structure_2x"]  == "LL") &
-        (df["trend_50_200"]      == "downtrend") &
+        df[hcon].astype(bool) &
+        (df[hs] == "LH") & (df[ls] == "LL") &
+        (df["trend_50_200"] == "downtrend") &
         (df["close"] > df["nw_lower"]) & atr_ok,
         "pivot_go_down_2x",
     ] = True
 
+    # _3x versiyonu (mevcut, dokunulmadı)
     df["pivot_go_up_3x"]   = False
     df["pivot_go_down_3x"] = False
 
@@ -286,30 +310,46 @@ def calculate_indicators(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
         "pivot_go_down_3x",
     ] = True
 
-    # ─── Breakout / Breakdown Sinyalleri ──────────────────────────────────────
+    # ─── pivot_go_breakout / pivot_go_breakdown ───────────────────────────────
+    # HL yapısı var ama HH yok — erken geçiş / zayıf yapı breakout'u
 
     df["pivot_go_breakout_2x"]  = False
     df["pivot_go_breakdown_2x"] = False
-    df["pivot_go_breakout_3x"]  = False
-    df["pivot_go_breakdown_3x"] = False
 
     df.loc[
-        df["low_confirmed_2x"].astype(bool) &
-        (df["low_structure_2x"]  == "HL") &
-        (df["high_structure_2x"] != "HH") &
-        df["high_pivot_ff_2x"].notna() &
-        (df["close"] > df["high_pivot_ff_2x"]) & atr_ok,
+        df[lcon].astype(bool) &
+        (df[ls] == "HL") & (df[hs] != "HH") &
+        df[hff].notna() & (df["close"] > df[hff]) & atr_ok,
         "pivot_go_breakout_2x",
     ] = True
 
     df.loc[
-        df["high_confirmed_2x"].astype(bool) &
-        (df["high_structure_2x"] == "LH") &
-        (df["low_structure_2x"]  != "LL") &
-        df["low_pivot_ff_2x"].notna() &
-        (df["close"] < df["low_pivot_ff_2x"]) & atr_ok,
+        df[hcon].astype(bool) &
+        (df[hs] == "LH") & (df[ls] != "LL") &
+        df[lff].notna() & (df["close"] < df[lff]) & atr_ok,
         "pivot_go_breakdown_2x",
     ] = True
+
+    # Secondary (shift teyitli)
+    df.loc[
+        (df[ls] == "HL") & long_shift_ok &
+        (df[hs] != "HH") & df[hff].notna() &
+        (df["close"] > df[hff]) & atr_ok &
+        (~df["pivot_go_breakout_2x"]),
+        "pivot_go_breakout_2x",
+    ] = True
+
+    df.loc[
+        (df[ls] != "LL") & short_shift_ok &
+        (df[hs] == "LH") & df[lff].notna() &
+        (df["close"] < df[lff]) & atr_ok &
+        (~df["pivot_go_breakdown_2x"]),
+        "pivot_go_breakdown_2x",
+    ] = True
+
+    # _3x (mevcut, dokunulmadı)
+    df["pivot_go_breakout_3x"]  = False
+    df["pivot_go_breakdown_3x"] = False
 
     df.loc[
         df["low_confirmed_3x"].astype(bool) &
@@ -329,90 +369,155 @@ def calculate_indicators(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
         "pivot_go_breakdown_3x",
     ] = True
 
-    # ─── Shift koşulu (ortak) ────────────────────────────────────────────────
-
-    long_conditions = [
-        (df["high_pivot_ff_2x"].notna() & (df["close"].shift(i) < df["high_pivot_ff_2x"])).fillna(False)
-        for i in range(1, 6)
-    ]
-    long_shift_ok = pd.concat(long_conditions, axis=1).all(axis=1)
-
-    short_conditions = [
-        (df["low_pivot_ff_2x"].notna() & (df["close"].shift(i) > df["low_pivot_ff_2x"])).fillna(False)
-        for i in range(1, 6)
-    ]
-    short_shift_ok = pd.concat(short_conditions, axis=1).all(axis=1)
-
-    # ─── pivot_go_breakout_2x: high_structure != HH (erken geçiş) ────────────
-
-    secondary_long = (
-        (df["low_structure_2x"]  == "HL") &
-        long_shift_ok &
-        (df["high_structure_2x"] != "HH") &
-        df["high_pivot_ff_2x"].notna() &
-        (df["close"] > df["high_pivot_ff_2x"]) &
-        atr_ok &
-        (~df["pivot_go_breakout_2x"])
-    )
-
-    secondary_short = (
-        (df["low_structure_2x"]  != "LL") &
-        short_shift_ok &
-        (df["high_structure_2x"] == "LH") &
-        df["low_pivot_ff_2x"].notna() &
-        (df["close"] < df["low_pivot_ff_2x"]) &
-        atr_ok &
-        (~df["pivot_go_breakdown_2x"])
-    )
-
-    df.loc[secondary_long,  "pivot_go_breakout_2x"]  = True
-    df.loc[secondary_short, "pivot_go_breakdown_2x"] = True
-
-    # ─── pivot_goup_breakout_2x: high_structure == HH (yapı teyitli) ─────────
-    # pivot_go_breakout_2x'ten BAĞIMSIZ ayrı bir sinyal sütunu
+    # ─── pivot_goup_breakout / pivot_goup_breakdown ───────────────────────────
+    # HL + HH yapısı teyitli breakout — en güçlü sinyal
 
     df["pivot_goup_breakout_2x"]  = False
     df["pivot_goup_breakdown_2x"] = False
 
     df.loc[
-        df["low_confirmed_2x"].astype(bool) &
-        (df["low_structure_2x"]  == "HL") &
-        (df["high_structure_2x"] == "HH") &
-        df["high_pivot_ff_2x"].notna() &
-        (df["close"] > df["high_pivot_ff_2x"]) & atr_ok,
+        df[lcon].astype(bool) &
+        (df[ls] == "HL") & (df[hs] == "HH") &
+        df[hff].notna() & (df["close"] > df[hff]) & atr_ok,
         "pivot_goup_breakout_2x",
     ] = True
 
     df.loc[
-        df["high_confirmed_2x"].astype(bool) &
-        (df["high_structure_2x"] == "LH") &
-        (df["low_structure_2x"]  == "LL") &
-        df["low_pivot_ff_2x"].notna() &
-        (df["close"] < df["low_pivot_ff_2x"]) & atr_ok,
+        df[hcon].astype(bool) &
+        (df[hs] == "LH") & (df[ls] == "LL") &
+        df[lff].notna() & (df["close"] < df[lff]) & atr_ok,
         "pivot_goup_breakdown_2x",
     ] = True
 
-    goup_long = (
-        (df["low_structure_2x"]  == "HL") &
-        long_shift_ok &
-        (df["high_structure_2x"] == "HH") &
-        df["high_pivot_ff_2x"].notna() &
-        (df["close"] > df["high_pivot_ff_2x"]) &
-        atr_ok &
-        (~df["pivot_goup_breakout_2x"])
-    )
+    # Secondary (shift teyitli)
+    df.loc[
+        (df[ls] == "HL") & long_shift_ok &
+        (df[hs] == "HH") & df[hff].notna() &
+        (df["close"] > df[hff]) & atr_ok &
+        (~df["pivot_goup_breakout_2x"]),
+        "pivot_goup_breakout_2x",
+    ] = True
 
-    goup_short = (
-        (df["low_structure_2x"]  == "LL") &
-        short_shift_ok &
-        (df["high_structure_2x"] == "LH") &
-        df["low_pivot_ff_2x"].notna() &
-        (df["close"] < df["low_pivot_ff_2x"]) &
-        atr_ok &
-        (~df["pivot_goup_breakdown_2x"])
-    )
+    df.loc[
+        (df[ls] == "LL") & short_shift_ok &
+        (df[hs] == "LH") & df[lff].notna() &
+        (df["close"] < df[lff]) & atr_ok &
+        (~df["pivot_goup_breakdown_2x"]),
+        "pivot_goup_breakdown_2x",
+    ] = True
 
-    df.loc[goup_long,  "pivot_goup_breakout_2x"]  = True
-    df.loc[goup_short, "pivot_goup_breakdown_2x"] = True
+    # ─── pivot_choch_breakout / pivot_choch_breakdown ─────────────────────────
+    # Change of Character: downtrend yapısından (LL+LH) yukarı kırılım
+    # veya uptrend yapısından (HL+HH) aşağı kırılım
+
+    df["pivot_choch_breakout_2x"]  = False
+    df["pivot_choch_breakdown_2x"] = False
+
+    df.loc[
+        df[lcon].astype(bool) &
+        (df[ls] == "LL") & (df[hs] == "LH") &
+        df[hff].notna() & (df["close"] > df[hff]) & atr_ok,
+        "pivot_choch_breakout_2x",
+    ] = True
+
+    df.loc[
+        df[hcon].astype(bool) &
+        (df[hs] == "HH") & (df[ls] == "HL") &
+        df[lff].notna() & (df["close"] < df[lff]) & atr_ok,
+        "pivot_choch_breakdown_2x",
+    ] = True
+
+    # Secondary (shift teyitli)
+    df.loc[
+        (df[ls] == "LL") & long_shift_ok &
+        (df[hs] == "LH") & df[hff].notna() &
+        (df["close"] > df[hff]) & atr_ok &
+        (~df["pivot_choch_breakout_2x"]),
+        "pivot_choch_breakout_2x",
+    ] = True
+
+    df.loc[
+        (df[ls] == "HL") & short_shift_ok &
+        (df[hs] == "HH") & df[lff].notna() &
+        (df["close"] < df[lff]) & atr_ok &
+        (~df["pivot_choch_breakdown_2x"]),
+        "pivot_choch_breakdown_2x",
+    ] = True
+
+    # ─── pivot_hhll_breakout / pivot_hhll_breakdown ───────────────────────────
+    # Karışık yapı: HH + LL veya HL + HH — trend henüz net değil
+
+    df["pivot_hhll_breakout_2x"]  = False
+    df["pivot_hhll_breakdown_2x"] = False
+
+    df.loc[
+        df[lcon].astype(bool) &
+        (df[ls] == "LL") & (df[hs] == "HH") &
+        df[hff].notna() & (df["close"] > df[hff]) & atr_ok,
+        "pivot_hhll_breakout_2x",
+    ] = True
+
+    df.loc[
+        df[hcon].astype(bool) &
+        (df[hs] == "HH") & (df[ls] == "LL") &
+        df[lff].notna() & (df["close"] < df[lff]) & atr_ok,
+        "pivot_hhll_breakdown_2x",
+    ] = True
+
+    # Secondary (shift teyitli)
+    df.loc[
+        (df[ls] == "LL") & long_shift_ok &
+        (df[hs] == "HH") & df[hff].notna() &
+        (df["close"] > df[hff]) & atr_ok &
+        (~df["pivot_hhll_breakout_2x"]),
+        "pivot_hhll_breakout_2x",
+    ] = True
+
+    df.loc[
+        (df[ls] == "LL") & short_shift_ok &
+        (df[hs] == "HH") & df[lff].notna() &
+        (df["close"] < df[lff]) & atr_ok &
+        (~df["pivot_hhll_breakdown_2x"]),
+        "pivot_hhll_breakdown_2x",
+    ] = True
+
+    # ─── pivot_breakout / pivot_breakdown ─────────────────────────────────────
+    # Yapı koşulu yok — sadece pivot teyidi + fiyat kırılımı
+
+    df["pivot_breakout_2x"]  = False
+    df["pivot_breakdown_2x"] = False
+
+    df.loc[
+        df[lcon].astype(bool) &
+        df[hff].notna() & (df["close"] > df[hff]) & atr_ok,
+        "pivot_breakout_2x",
+    ] = True
+
+    df.loc[
+        df[hcon].astype(bool) &
+        df[lff].notna() & (df["close"] < df[lff]) & atr_ok,
+        "pivot_breakdown_2x",
+    ] = True
+
+    # Secondary (shift teyitli)
+    df.loc[
+        long_shift_ok & df[hff].notna() &
+        (df["close"] > df[hff]) & atr_ok &
+        (~df["pivot_breakout_2x"]),
+        "pivot_breakout_2x",
+    ] = True
+
+    df.loc[
+        short_shift_ok & df[lff].notna() &
+        (df["close"] < df[lff]) & atr_ok &
+        (~df["pivot_breakdown_2x"]),
+        "pivot_breakdown_2x",
+    ] = True
+
+    # ─── pivot_no_goup_breakout / pivot_no_goup_breakdown ─────────────────────
+    # pivot_breakout var ama pivot_goup_breakout yok — zayıf yapılı kırılımlar
+
+    df["pivot_no_goup_breakout_2x"]  = (df["pivot_breakout_2x"]  == True) & (df["pivot_goup_breakout_2x"]  == False)
+    df["pivot_no_goup_breakdown_2x"] = (df["pivot_breakdown_2x"] == True) & (df["pivot_goup_breakdown_2x"] == False)
 
     return df
