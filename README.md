@@ -1,3 +1,4 @@
-# Change of Character - Breakout Strategy 
-* TP = Entry + 2.5 ATR
-* SL = Entry - 2.5 ATR
+# NO GOUP BREAKOUT STRATEGY - BYBIT
+* TP = ENTRY + 2 ATR
+* SL = ENTRY - 2 ATR
+* RR:1
