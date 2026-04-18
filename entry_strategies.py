@@ -5,9 +5,9 @@ SHORT_PAIRS_2X = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT','XRPUSDT','DOGEUSDT']
 
 def check_long_entry(row: Dict[str, Any], symbol: str) -> bool:
     if symbol in LONG_PAIRS_2X:
-        return row['pivot_choch_breakout_2x'] == True
+        return row['pivot_no_goup_breakout_2x'] == True
     return False
 
 def check_short_entry(row: Dict[str, Any], symbol: str) -> bool:
-    atr_steps_col = 'pivot_choch_breakdown_2x' if symbol in SHORT_PAIRS_2X else 'pivot_go_down_3x'
+    atr_steps_col = 'pivot_no_goup_breakdown_2x' if symbol in SHORT_PAIRS_2X else 'pivot_go_down_3x'
     return row[atr_steps_col] == True
