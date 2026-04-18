@@ -1,171 +1,158 @@
+from pybit.unified_trading import HTTP
+from typing import Dict, Any, Optional, Tuple
 import logging
-from typing import Dict, Optional, Tuple
-
-from exchange import BinanceFuturesClient
-from config import TP_ATR_MULTIPLIER, SL_ATR_MULTIPLIER, PRICE_PRECISION
-
-logger = logging.getLogger(__name__)
-
+from config import TP_ROUND_NUMBERS
 
 class ExitStrategy:
-    """TP/SL emir yönetimi — Binance USDM Futures (ccxt)."""
+    def __init__(self, bybit_client: HTTP):
+        self.client = bybit_client
+        self.logger = logging.getLogger(__name__)
 
-    def __init__(self, client: BinanceFuturesClient):
-        self.client = client
-
-    # ─── Seviye Hesaplama ─────────────────────────────────────────────────────
-
-    def calculate_levels(
-        self,
-        entry_price: float,
-        atr_value:   float,
-        direction:   str,
-        symbol:      str,
-    ) -> Tuple[float, float]:
-        """ATR bazlı TP ve SL fiyatlarını hesaplar."""
-        precision = PRICE_PRECISION.get(symbol, 4)
-
+    def calculate_levels(self, entry_price: float, atr_value: float, direction: str, symbol: str) -> Tuple[float, float]:
+        """ATR değerine göre TP/SL seviyelerini hesaplar"""
         if direction == "LONG":
-            tp = entry_price + TP_ATR_MULTIPLIER * atr_value
-            sl = entry_price - SL_ATR_MULTIPLIER * atr_value
+            take_profit = entry_price + (2 * atr_value)  # 🟢 Direct ATR add
+            stop_loss = entry_price - (2 * atr_value)
         else:
-            tp = entry_price - TP_ATR_MULTIPLIER * atr_value
-            sl = entry_price + SL_ATR_MULTIPLIER * atr_value
+            take_profit = entry_price - (2 * atr_value)
+            stop_loss = entry_price + (2 * atr_value)
+                
+        round_to = TP_ROUND_NUMBERS.get(symbol, 3)
+        
+        return (round(take_profit, round_to), round(stop_loss, round_to))
 
-        return round(tp, precision), round(sl, precision)
-
-    # ─── TP/SL Emir Yerleştirme ───────────────────────────────────────────────
-
-    def place_tp_sl_orders(
-        self,
-        symbol:    str,
-        direction: str,
-        tp_price:  float,
-        sl_price:  float,
-        quantity:  float,
-    ) -> Dict:
-        """
-        Limit TP + Stop-Market SL emirlerini yerleştirir.
-        OCO takibi için her iki emir ID'sini döndürür.
-        """
-        close_side = "sell" if direction == "LONG" else "buy"
-
-        # TP → Limit emri
-        tp_order = self.client.place_limit_order(
-            symbol=symbol,
-            side=close_side,
-            amount=quantity,
-            price=tp_price,
-            reduce_only=True,
-        )
-
-        if tp_order is None:
-            logger.error("%s TP emri gönderilemedi", symbol)
-            return {"success": False}
-
-        # SL → Stop-Market emri
-        sl_order = self.client.place_stop_market_order(
-            symbol=symbol,
-            side=close_side,
-            amount=quantity,
-            stop_price=sl_price,
-            reduce_only=True,
-        )
-
-        if sl_order is None:
-            logger.error("%s SL emri gönderilemedi — TP iptal ediliyor", symbol)
-            self.client.cancel_order(symbol, tp_order["id"])
-            return {"success": False}
-
-        tp_id = tp_order["id"]
-        sl_id = sl_order["id"]
-        logger.info("%s TP Limit: %.5f (ID: %s)", symbol, tp_price, tp_id)
-        logger.info("%s SL Stop:  %.5f (ID: %s)", symbol, sl_price, sl_id)
-
-        oco_pair = {
-            "symbol":     symbol,
-            "tp_order_id": tp_id,
-            "sl_order_id": sl_id,
-            "active":     True,
-        }
-        return {"success": True, "oco_pair": oco_pair}
-
-    # ─── OCO Kontrolü ─────────────────────────────────────────────────────────
-
-    def check_and_cancel_oco(self, oco_pair: Dict) -> Dict:
-        """
-        TP veya SL tetiklendiyse karşı emri iptal eder.
-        Dönen dict: triggered ('TP'|'SL'|None), cancelled ('SL'|'TP'|None)
-        """
-        if not oco_pair.get("active"):
-            return {"already_handled": True}
-
-        symbol = oco_pair["symbol"]
-        tp_id  = oco_pair["tp_order_id"]
-        sl_id  = oco_pair["sl_order_id"]
-
-        tp_status = self._get_order_status(symbol, tp_id)
-        sl_status = self._get_order_status(symbol, sl_id)
-
-        if tp_status == "closed":
-            logger.info("%s TP tetiklendi — SL iptal ediliyor", symbol)
-            self.client.cancel_order(symbol, sl_id)
-            oco_pair["active"] = False
-            return {"triggered": "TP", "cancelled": "SL"}
-
-        if sl_status == "closed":
-            logger.info("%s SL tetiklendi — TP iptal ediliyor", symbol)
-            self.client.cancel_order(symbol, tp_id)
-            oco_pair["active"] = False
-            return {"triggered": "SL", "cancelled": "TP"}
-
-        return {"triggered": None}
-
-    # ─── Yardımcı ─────────────────────────────────────────────────────────────
-
-    def _get_order_status(self, symbol: str, order_id: str) -> str:
-        """
-        Önce normal emirlerde, sonra algo (stop-market) emirlerde arar.
-        Döner: 'open' | 'closed' | 'canceled' | 'not_found'
-        """
-        # 1. Açık normal emirlerde ara
-        open_orders = self.client.get_open_orders(symbol)
-        for o in open_orders:
-            if str(o["id"]) == str(order_id):
-                return o.get("status", "open")
-    
-        # 2. Normal emir geçmişinde ara
+    def set_limit_tp_sl(self, symbol, direction, tp_price, sl_price, quantity):
+        """Limit TP ve Stop-Market SL emirleri oluştur (OCO mantığı ile)"""
         try:
-            order = self.client.get_order(symbol, order_id)
-            if order:
-                return order.get("status", "unknown")
-        except Exception:
-            pass
+            tp_side = "Sell" if direction == "LONG" else "Buy"
+            trigger_direction = 2 if direction == "LONG" else 1
+            
+            # TP için LIMIT emri
+            tp_order = self.client.place_order(
+                category="linear",
+                symbol=symbol,
+                side=tp_side,
+                orderType="Limit",
+                qty=str(quantity),
+                price=str(tp_price),
+                reduceOnly=True,
+                timeInForce="GTC"
+            )
+            
+            # SL için STOP-MARKET emri
+            sl_order = self.client.place_order(
+                category="linear", 
+                symbol=symbol,
+                side=tp_side,
+                orderType="Market",
+                qty=str(quantity),
+                triggerPrice=str(sl_price),
+                triggerDirection=trigger_direction,
+                triggerBy="LastPrice",
+                reduceOnly=True
+            )
+            
+            tp_order_id = tp_order['result']['orderId']
+            sl_order_id = sl_order['result']['orderId']
+            
+            print(f"✓ TP Limit: {tp_price} (ID: {tp_order_id})")
+            print(f"✓ SL Stop: {sl_price} (ID: {sl_order_id})")
+            
+            # OCO mantığı için emirleri kaydet
+            oco_pair = {
+                'symbol': symbol,
+                'tp_order_id': tp_order_id,
+                'sl_order_id': sl_order_id,
+                'active': True
+            }
+            
+            return {
+                'tp_order_id': tp_order_id,
+                'sl_order_id': sl_order_id,
+                'oco_pair': oco_pair,
+                'success': True
+            }
+            
+        except Exception as e:
+            print(f"❌ Limit TP/SL hatası: {e}")
+            import traceback
+            traceback.print_exc()
+            return {'success': False, 'error': str(e)}
     
-        # 3. Algo (stop-market) emirlerde ara
+    
+    def check_and_cancel_oco(self, oco_pair):
+        """Bir emir tetiklenirse diğerini iptal et (OCO mantığı)"""
+        if not oco_pair.get('active'):
+            return {'already_handled': True}
+        
         try:
-            raw_symbol = symbol.replace("/", "").replace(":USDT", "")
-            algo_orders = self.client.client.fapiPrivateGetAllAlgoOrders({
-                "symbol": raw_symbol,
-            })
-            mapping = {
-                        "NEW":      "open",
-                        "WORKING":  "open",
-                        "FILLED":   "closed",
-                        "FINISHED": "closed",  # ← bunu ekle
-                        "CANCELED": "canceled",
-                        "EXPIRED":  "expired",
-                    }
-            for o in algo_orders:
-                if str(o["algoId"]) == str(order_id):
-                    status = o.get("algoStatus", "unknown")
-                    return mapping.get(status, status.lower())
-        except Exception:
-            pass
+            symbol = oco_pair['symbol']
+            tp_id = oco_pair['tp_order_id']
+            sl_id = oco_pair['sl_order_id']
+            
+            # Her iki emrin durumunu kontrol et
+            tp_status = self.get_order_status(symbol, tp_id)
+            sl_status = self.get_order_status(symbol, sl_id)
+            
+            # TP tetiklendi mi? (Filled)
+            if tp_status == 'Filled':
+                print(f"✓ TP tetiklendi! SL iptal ediliyor...")
+                self.cancel_order(symbol, sl_id)
+                oco_pair['active'] = False
+                return {'triggered': 'TP', 'cancelled': 'SL'}
+            
+            # SL tetiklendi mi? (Filled veya Triggered)
+            if sl_status in ['Filled', 'Triggered']:
+                print(f"✓ SL tetiklendi! TP iptal ediliyor...")
+                self.cancel_order(symbol, tp_id)
+                oco_pair['active'] = False
+                return {'triggered': 'SL', 'cancelled': 'TP'}
+            
+            return {'status': 'both_active'}
+            
+        except Exception as e:
+            print(f"❌ OCO kontrol hatası: {e}")
+            return {'error': str(e)}
     
-        return "not_found"
-
-    def cancel_tp_sl_orders(self, symbol: str, oco_pair: Dict) -> None:
-        """OCO çiftinin her iki emrini de iptal eder."""
-        self.client.cancel_order(symbol, oco_pair["tp_order_id"])
-        self.client.cancel_order(symbol, oco_pair["sl_order_id"])
+    
+    def get_order_status(self, symbol, order_id):
+        """Emir durumunu sorgula"""
+        try:
+            result = self.client.get_open_orders(
+                category="linear",
+                symbol=symbol,
+                orderId=order_id
+            )
+            
+            orders = result['result']['list']
+            if not orders:
+                # Açık emirlerde yoksa, geçmiş emirleri kontrol et
+                history = self.client.get_order_history(
+                    category="linear",
+                    symbol=symbol,
+                    orderId=order_id
+                )
+                if history['result']['list']:
+                    return history['result']['list'][0]['orderStatus']
+                return 'NotFound'
+            
+            return orders[0]['orderStatus']
+            
+        except Exception as e:
+            print(f"❌ Emir durum sorgu hatası: {e}")
+            return 'Error'
+    
+    
+    def cancel_order(self, symbol, order_id):
+        """Emri iptal et"""
+        try:
+            result = self.client.cancel_order(
+                category="linear",
+                symbol=symbol,
+                orderId=order_id
+            )
+            print(f"✓ Emir iptal edildi: {order_id}")
+            return result
+        except Exception as e:
+            print(f"❌ İptal hatası: {e}")
+            return None
