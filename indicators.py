@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from config import ATR_RANGES,Z_INDICATOR_PARAMS, Z_RANGES
+from config import atr_ranges,Z_INDICATOR_PARAMS, Z_RANGES
 import warnings
 warnings.filterwarnings('ignore', category=FutureWarning)
 
