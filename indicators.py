@@ -1,334 +1,523 @@
 import numpy as np
 import pandas as pd
-from config import atr_ranges,Z_INDICATOR_PARAMS, Z_RANGES
 import warnings
-warnings.filterwarnings('ignore', category=FutureWarning)
 
-# --- RSI ---
-def calculate_rsi(price_data, window=14, price_col='close'):
-    delta = price_data[price_col].diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=window).mean()
-    avg_loss = loss.rolling(window=window).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+from config import atr_ranges, Z_RANGES, Z_INDICATOR_PARAMS
 
-# --- ATR ---
-def calculate_atr(price_data, window=14):
-    high = price_data['high']
-    low = price_data['low']
-    close = price_data['close']
-    previous_close = close.shift(1)
-    tr1 = high - low
-    tr2 = abs(high - previous_close)
-    tr3 = abs(low - previous_close)
-    true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = true_range.ewm(alpha=1/window, adjust=False).mean()
-    return atr
+warnings.filterwarnings("ignore", category=FutureWarning)
 
-# --- Donchian Channel ---
-def calculate_donchian_channel(price_data, window=20):
-    upper_band = price_data['high'].rolling(window=window).max()
-    lower_band = price_data['low'].rolling(window=window).min()
-    middle_band = (upper_band + lower_band) / 2
-    return pd.DataFrame({'dc_upper': upper_band, 'dc_lower': lower_band, 'dc_middle': middle_band})
 
-# --- SMA ---
-def calculate_sma(price_data, window=50, price_col='close'):    
-    sma = price_data[price_col].rolling(window=window).mean()
-    return sma
+# ─── Temel Göstergeler ────────────────────────────────────────────────────────
 
-# --- SMA Trend ---
-def determine_sma_trend(price_data, short_window=50, long_window=200, price_col='close'):
-    short_sma = price_data[price_col].rolling(window=short_window).mean()
-    long_sma = price_data[price_col].rolling(window=long_window).mean()
-    trend = np.where(short_sma > long_sma, 'uptrend', 'downtrend')
-    return pd.Series(trend, index=price_data.index)
+def calculate_rsi(df: pd.DataFrame, window: int = 14, col: str = "close") -> pd.Series:
+    delta    = df[col].diff()
+    gain     = delta.where(delta > 0, 0.0)
+    loss     = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.rolling(window).mean()
+    avg_loss = loss.rolling(window).mean()
+    rs       = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
 
-# --- Nadaraya-Watson Envelope ---
-def calculate_nadaraya_watson_envelope_optimized(df, bandwidth=8.0, multiplier=3.0, source_col='close', window_size=50):
-    n_bars = len(df)
-    source_data = df[source_col].values
-    def gauss(x, h): return np.exp(-(x**2) / (h * h * 2))
-    weights = np.array([gauss(i, bandwidth) for i in range(window_size)])
-    weights_sum = np.sum(weights)
-    nw_out_arr = np.full(n_bars, np.nan)
-    nw_lower_arr = np.full(n_bars, np.nan)
-    nw_upper_arr = np.full(n_bars, np.nan)
 
-    for i in range(n_bars):
-        if i < window_size - 1:
-            continue
-        weighted_sum = np.dot(source_data[i - window_size + 1 : i + 1], weights[::-1])
-        current_nw_out = weighted_sum / weights_sum
-        nw_out_arr[i] = current_nw_out
-        abs_diffs = np.abs(source_data[i - window_size + 1 : i + 1] - nw_out_arr[i - window_size + 1 : i + 1])
-        current_mae = np.mean(abs_diffs) * multiplier
-        nw_lower_arr[i] = current_nw_out - current_mae
-        nw_upper_arr[i] = current_nw_out + current_mae
+def calculate_atr(df: pd.DataFrame, window: int = 14) -> pd.Series:
+    high  = df["high"]
+    low   = df["low"]
+    close = df["close"]
+    prev  = close.shift(1)
+    tr    = pd.concat([high - low, (high - prev).abs(), (low - prev).abs()], axis=1).max(axis=1)
+    return tr.ewm(alpha=1 / window, adjust=False).mean()
 
-    return pd.DataFrame({'nw': nw_out_arr, 'nw_upper': nw_upper_arr, 'nw_lower': nw_lower_arr}, index=df.index)
 
-def atr_zigzag_two_columns(df, atr_col="atr", close_col="close", atr_mult=1, suffix=""): 
-    closes = df[close_col].values
-    atrs = df[atr_col].values
+def calculate_sma(df: pd.DataFrame, window: int, col: str = "close") -> pd.Series:
+    return df[col].rolling(window).mean()
 
-    high_pivot = [None] * len(df)
-    low_pivot = [None] * len(df)
-    high_pivot_atr = [None] * len(df)
-    low_pivot_atr = [None] * len(df)
-    high_pivot_confirmed = [0] * len(df)
-    low_pivot_confirmed = [0] * len(df)
-    pivot_bars_ago = [None] * len(df)
 
-    last_pivot = closes[0]
-    last_atr = atrs[0]
-    last_pivot_idx = 0
-    direction = None
+def calculate_donchian(df: pd.DataFrame, window: int) -> pd.DataFrame:
+    upper  = df["high"].rolling(window).max()
+    lower  = df["low"].rolling(window).min()
+    middle = (upper + lower) / 2
+    return pd.DataFrame({"upper": upper, "lower": lower, "middle": middle})
 
-    for i in range(1, len(df)):
-        price = closes[i]
-        atr = atrs[i] * atr_mult
 
-        if direction is None:
-            if price >= last_pivot + atr:
-                direction = "up"
-                last_pivot = closes[last_pivot_idx]
-                high_pivot[last_pivot_idx] = last_pivot
-                high_pivot_atr[last_pivot_idx] = atrs[last_pivot_idx]
-            elif price <= last_pivot - atr:
-                direction = "down"
-                last_pivot = closes[last_pivot_idx]
-                low_pivot[last_pivot_idx] = last_pivot
-                low_pivot_atr[last_pivot_idx] = atrs[last_pivot_idx]
+def calculate_nadaraya_watson(
+    df:         pd.DataFrame,
+    bandwidth:  float = 8.0,
+    multiplier: float = 3.0,
+    col:        str   = "close",
+    window:     int   = 50,
+) -> pd.DataFrame:
+    n      = len(df)
+    src    = df[col].values
 
-        elif direction == "up":
-            if price <= (last_pivot - atr):
-                high_pivot[last_pivot_idx] = last_pivot
-                high_pivot_atr[last_pivot_idx] = atrs[last_pivot_idx]
-                high_pivot_confirmed[i] = 1
-                pivot_bars_ago[i] = i - last_pivot_idx
+    def gauss(x, h):
+        return np.exp(-(x ** 2) / (h * h * 2))
 
-                direction = "down"
-                last_pivot = price
-                last_pivot_idx = i
-            elif price > last_pivot:
-                last_pivot = price
-                last_pivot_idx = i
+    weights     = np.array([gauss(i, bandwidth) for i in range(window)])
+    weights_sum = weights.sum()
 
-        elif direction == "down":
-            if price >= (last_pivot + atr):
-                low_pivot[last_pivot_idx] = last_pivot
-                low_pivot_atr[last_pivot_idx] = atrs[last_pivot_idx]
-                low_pivot_confirmed[i] = 1
-                pivot_bars_ago[i] = i - last_pivot_idx
+    nw_mid   = np.full(n, np.nan)
+    nw_upper = np.full(n, np.nan)
+    nw_lower = np.full(n, np.nan)
 
-                direction = "up"
-                last_pivot = price
-                last_pivot_idx = i
-            elif price < last_pivot:
-                last_pivot = price
-                last_pivot_idx = i
+    for i in range(window - 1, n):
+        wsum      = np.dot(src[i - window + 1 : i + 1], weights[::-1])
+        mid       = wsum / weights_sum
+        nw_mid[i] = mid
+        mae       = np.mean(np.abs(src[i - window + 1 : i + 1] - nw_mid[i - window + 1 : i + 1])) * multiplier
+        nw_upper[i] = mid + mae
+        nw_lower[i] = mid - mae
 
-    # Sütun isimlerine suffix ekle
-    df[f"high_pivot{suffix}"] = high_pivot
-    df[f"low_pivot{suffix}"] = low_pivot
-    df[f"high_pivot_atr{suffix}"] = high_pivot_atr
-    df[f"low_pivot_atr{suffix}"] = low_pivot_atr
-    df[f"high_pivot_confirmed{suffix}"] = high_pivot_confirmed
-    df[f"low_pivot_confirmed{suffix}"] = low_pivot_confirmed
-    df[f"pivot_bars_ago{suffix}"] = pivot_bars_ago
+    return pd.DataFrame({"nw": nw_mid, "nw_upper": nw_upper, "nw_lower": nw_lower}, index=df.index)
 
-    # Forward fill işlemleri - suffix eklenmiş isimlerle
-    df[f"high_pivot_filled{suffix}"] = df[f"high_pivot{suffix}"].ffill()
-    df[f"low_pivot_filled{suffix}"] = df[f"low_pivot{suffix}"].ffill()
-    df[f"high_pivot_atr_filled{suffix}"] = df[f"high_pivot_atr{suffix}"].ffill()
-    df[f"low_pivot_atr_filled{suffix}"] = df[f"low_pivot_atr{suffix}"].ffill()
 
-    # High pivot confirmed - suffix ile
-    high_temp = df[f"high_pivot_confirmed{suffix}"].replace(0, np.nan)
-    high_temp = high_temp.ffill()
-    df[f"high_pivot_confirmed_filled{suffix}"] = high_temp.fillna(0).astype(int)
-    
-    # Low pivot confirmed - suffix ile
-    low_temp = df[f"low_pivot_confirmed{suffix}"].replace(0, np.nan)
-    low_temp = low_temp.ffill()
-    df[f"low_pivot_confirmed_filled{suffix}"] = low_temp.fillna(0).astype(int)
+# ─── Z Göstergesi ─────────────────────────────────────────────────────────────
 
-    # Pivot bars ago filled
-    pivot_bars_filled = []
-    last_valid_value = None
-    last_valid_index = None
+def calculate_z(df: pd.DataFrame, symbol: str) -> pd.Series:
+    if symbol not in Z_RANGES:
+        raise ValueError(f"Z_RANGES içinde {symbol} tanımlı değil.")
+    pct_min, pct_max = Z_RANGES[symbol]
+    mult = Z_INDICATOR_PARAMS["atr_multiplier"]
+    return np.minimum(
+        np.maximum(df["close"] * pct_min / 100, mult * df["atr"]),
+        df["close"] * pct_max / 100,
+    )
 
-    for i, value in enumerate(pivot_bars_ago):
-        if value is not None:
-            last_valid_value = value
-            last_valid_index = i
-            pivot_bars_filled.append(value)
-        elif last_valid_value is not None:
-            new_value = last_valid_value + (i - last_valid_index)
-            pivot_bars_filled.append(new_value)
-        else:
-            pivot_bars_filled.append(None)
 
-    df[f"pivot_bars_ago_filled{suffix}"] = pivot_bars_filled
+# ─── ATR ZigZag ───────────────────────────────────────────────────────────────
 
-    return df
+def calculate_atr_zigzag(df: pd.DataFrame, atr_col: str = "atr", atr_mult: float = 1.0, suffix: str = "") -> pd.DataFrame:
+    closes = df["close"].values
+    atrs   = df[atr_col].values
+    n      = len(df)
 
-def calculate_z(df, symbol):
-    
-    if symbol not in Z_RANGES:
-        raise ValueError(f"Z_RANGES'de {symbol} için değer tanımlanmamış!")
-  
-    pct_min, pct_max = Z_RANGES[symbol]  
-    atr_mult = Z_INDICATOR_PARAMS['atr_multiplier']
+    high_pivot     = [None] * n
+    low_pivot      = [None] * n
+    high_pivot_atr = [None] * n
+    low_pivot_atr  = [None] * n
+    high_confirmed = [0] * n
+    low_confirmed  = [0] * n
+    pivot_bars_ago = [None] * n
 
-    z = np.minimum(
-        np.maximum(
-            df['close'] * pct_min / 100,
-            atr_mult * df['atr']
-        ),
-        df['close'] * pct_max / 100
-    )
-    
-    return z
+    last_price     = closes[0]
+    last_pivot_idx = 0
+    direction      = None
 
-# --- Calculations ---
-def calculate_indicators(df, symbol):
-    df['rsi'] = calculate_rsi(df)
-    df['atr'] = calculate_atr(df)
-    df['pct_atr'] = (df['atr'] / df['close']) * 100
-    
-    df['z'] = calculate_z(df, symbol=symbol)
-    df['pct_z'] = (df['z'] / df['close']) * 100
-    
-    for w in [20, 50]:
-        dc = calculate_donchian_channel(df, window=w)
-        df[f'dc_upper_{w}'] = dc['dc_upper']
-        df[f'dc_lower_{w}'] = dc['dc_lower']
-        df[f'dc_middle_{w}'] = dc['dc_middle']
-        df[f'dc_position_ratio_{w}'] = (df['close'] - df[f'dc_lower_{w}']) / (df[f'dc_upper_{w}'] - df[f'dc_lower_{w}']) * 100
-        df[f'dc_breakout_{w}'] = df['high'] > df[f'dc_upper_{w}']
-        df[f'dc_breakdown_{w}'] = df['low'] < df[f'dc_lower_{w}']
-    
-    df['sma_50'] = calculate_sma(df,window=50)
-    df['sma_200'] = calculate_sma(df,window=200)
-    
-    df['trend_50_200'] = determine_sma_trend(df, short_window=50, long_window=200)
+    for i in range(1, n):
+        price = closes[i]
+        atr   = atrs[i] * atr_mult
 
-    nw = calculate_nadaraya_watson_envelope_optimized(df)
-    df[['nw', 'nw_upper', 'nw_lower']] = nw
-    
-    df = atr_zigzag_two_columns(df, atr_col="z", close_col="close", atr_mult=1.25, suffix='_2x')
-    df = atr_zigzag_two_columns(df, atr_col="z", close_col="close", atr_mult=3, suffix='_3x')
+        if direction is None:
+            if price >= last_price + atr:
+                direction = "up"
+                high_pivot[last_pivot_idx]     = closes[last_pivot_idx]
+                high_pivot_atr[last_pivot_idx] = atrs[last_pivot_idx]
+            elif price <= last_price - atr:
+                direction = "down"
+                low_pivot[last_pivot_idx]     = closes[last_pivot_idx]
+                low_pivot_atr[last_pivot_idx] = atrs[last_pivot_idx]
 
-    df.loc[df['high_pivot_filled_2x'] < df['high_pivot_filled_2x'].shift(1), 'high_structure_2x'] = 'LH'
-    df.loc[df['high_pivot_filled_2x'] > df['high_pivot_filled_2x'].shift(1), 'high_structure_2x'] = 'HH'
-    df.loc[df['low_pivot_filled_2x'] < df['low_pivot_filled_2x'].shift(1), 'low_structure_2x'] = 'LL'
-    df.loc[df['low_pivot_filled_2x'] > df['low_pivot_filled_2x'].shift(1), 'low_structure_2x'] = 'HL'
-    
-    df['high_structure_2x'] = df['high_structure_2x'].ffill().fillna('HH')
-    df['low_structure_2x'] = df['low_structure_2x'].ffill().fillna('LL')
-    
-    df.loc[df['high_pivot_filled_3x'] < df['high_pivot_filled_3x'].shift(1), 'high_structure_3x'] = 'LH'
-    df.loc[df['high_pivot_filled_3x'] > df['high_pivot_filled_3x'].shift(1), 'high_structure_3x'] = 'HH'
-    df.loc[df['low_pivot_filled_3x'] < df['low_pivot_filled_3x'].shift(1), 'low_structure_3x'] = 'LL'
-    df.loc[df['low_pivot_filled_3x'] > df['low_pivot_filled_3x'].shift(1), 'low_structure_3x'] = 'HL'
-    
-    df['high_structure_3x'] = df['high_structure_3x'].ffill().fillna('HH')
-    df['low_structure_3x'] = df['low_structure_3x'].ffill().fillna('LL')
-    
-    df['pivot_go_up_2x'] = False
-    df['pivot_go_down_2x'] = False
-    df.loc[(df['low_pivot_confirmed_2x']) & (df['low_structure_2x']=='HL') & (df['high_structure_2x']=='HH') & (df['trend_50_200']== 'uptrend') & (df['close'] < df['nw_upper']) & (atr_ranges[symbol][0] < df['pct_atr']) & (df['pct_atr'] < atr_ranges[symbol][1]), 'pivot_go_up_2x'] = True
-    df.loc[(df['high_pivot_confirmed_2x']) & (df['high_structure_2x']=='LH') & (df['low_structure_2x']=='LL') & (df['trend_50_200']== 'downtrend') & (df['close'] > df['nw_lower']) & (atr_ranges[symbol][0] < df['pct_atr']) & (df['pct_atr'] < atr_ranges[symbol][1]), 'pivot_go_down_2x'] = True
-    
-    df['pivot_go_up_3x'] = False
-    df['pivot_go_down_3x'] = False
-    df.loc[(df['low_pivot_confirmed_3x']) & (df['low_structure_3x']=='HL') & (df['high_structure_3x']=='HH') &  (df['close'] < df['nw_upper']) & (atr_ranges[symbol][0] < df['pct_atr']) & (df['pct_atr'] < atr_ranges[symbol][1]), 'pivot_go_up_3x'] = True
-    df.loc[(df['high_pivot_confirmed_3x']) & (df['high_structure_3x']=='LH') & (df['low_structure_3x']=='LL') & (df['close'] > df['nw_lower']) & (atr_ranges[symbol][0] < df['pct_atr']) & (df['pct_atr'] < atr_ranges[symbol][1]), 'pivot_go_down_3x'] = True
+        elif direction == "up":
+            if price <= last_price - atr:
+                high_pivot[last_pivot_idx]     = last_price
+                high_pivot_atr[last_pivot_idx] = atrs[last_pivot_idx]
+                high_confirmed[i] = 1
+                pivot_bars_ago[i] = i - last_pivot_idx
+                direction      = "down"
+                last_price     = price
+                last_pivot_idx = i
+            elif price > last_price:
+                last_price     = price
+                last_pivot_idx = i
 
-    df['pivot_go_breakout_2x'] = False
-    df['pivot_go_breakdown_2x'] = False
-    df['pivot_go_breakout_3x'] = False
-    df['pivot_go_breakdown_3x'] = False
-    
-    df.loc[(df['low_pivot_confirmed_2x']) & 
-           (df['low_structure_2x']=='HL') & 
-           (df['high_structure_2x']!='HH') & 
-           (df['high_pivot_filled_2x'].notna()) &  
-           (df['close'] > df['high_pivot_filled_2x']) & 
-           (atr_ranges[symbol][0] < df['pct_atr']) & 
-           (df['pct_atr'] < atr_ranges[symbol][1]), 'pivot_go_breakout_2x'] = True
-    
-    df.loc[(df['high_pivot_confirmed_2x']) & 
-           (df['high_structure_2x']=='LH') & 
-           (df['low_structure_2x']!='LL') & 
-           (df['low_pivot_filled_2x'].notna()) &  
-           (df['close'] < df['low_pivot_filled_2x']) & 
-           (atr_ranges[symbol][0] < df['pct_atr']) & 
-           (df['pct_atr'] < atr_ranges[symbol][1]), 'pivot_go_breakdown_2x'] = True
-    
-    df.loc[(df['low_pivot_confirmed_3x']) & 
-           (df['low_structure_3x']=='HL') & 
-           (df['high_structure_3x']!='HH') & 
-           (df['high_pivot_filled_3x'].notna()) &  
-           (df['close'] > df['high_pivot_filled_3x']) & 
-           (atr_ranges[symbol][0] < df['pct_atr']) & 
-           (df['pct_atr'] < atr_ranges[symbol][1]), 'pivot_go_breakout_3x'] = True
-    
-    df.loc[(df['high_pivot_confirmed_3x']) & 
-           (df['high_structure_3x']=='LH') & 
-           (df['low_structure_3x']!='LL') & 
-           (df['low_pivot_filled_3x'].notna()) &  # 
-           (df['close'] < df['low_pivot_filled_3x']) & 
-           (atr_ranges[symbol][0] < df['pct_atr']) & 
-           (df['pct_atr'] < atr_ranges[symbol][1]), 'pivot_go_breakdown_3x'] = True
-    
-    low_atr = atr_ranges[symbol][0]
-    high_atr = atr_ranges[symbol][1]
-    
-    # NaN Control long conditions
-    long_conditions = [
-        ((df['high_pivot_filled_2x'].notna()) & 
-         (df['close'].shift(i) < df['high_pivot_filled_2x'])).fillna(False) 
-        for i in range(1, 6)
-    ]
-    long_shift_condition = pd.concat(long_conditions, axis=1).all(axis=1)
-    
-    second_long_condition = (
-        (df['low_structure_2x'] == 'HL') & 
-        long_shift_condition & 
-        (df['high_structure_2x'] != 'HH') & 
-        (df['high_pivot_filled_2x'].notna()) & 
-        (df['close'] > df['high_pivot_filled_2x']) & 
-        (low_atr < df['pct_atr']) & 
-        (df['pct_atr'] < high_atr) & 
-        (df['pivot_go_breakout_2x'] == False)
-    )
-    
-    # NaN Control short conditions
-    short_conditions = [
-        ((df['low_pivot_filled_2x'].notna()) & 
-         (df['close'].shift(i) > df['low_pivot_filled_2x'])).fillna(False) 
-        for i in range(1, 6)
-    ]
-    short_shift_condition = pd.concat(short_conditions, axis=1).all(axis=1)
-    
-    second_short_condition = (
-        (df['low_structure_2x'] != 'LL') & 
-        short_shift_condition & 
-        (df['high_structure_2x'] == 'LH') & 
-        (df['low_pivot_filled_2x'].notna()) & 
-        (df['close'] < df['low_pivot_filled_2x']) & 
-        (low_atr < df['pct_atr']) & 
-        (df['pct_atr'] < high_atr) & 
-        (df['pivot_go_breakdown_2x'] == False)
-    )
-    
-    df.loc[second_long_condition,'pivot_go_breakout_2x'] = True
-    df.loc[second_short_condition,'pivot_go_breakdown_2x'] = True
-    
-    return df
+        elif direction == "down":
+            if price >= last_price + atr:
+                low_pivot[last_pivot_idx]     = last_price
+                low_pivot_atr[last_pivot_idx] = atrs[last_pivot_idx]
+                low_confirmed[i] = 1
+                pivot_bars_ago[i] = i - last_pivot_idx
+                direction      = "up"
+                last_price     = price
+                last_pivot_idx = i
+            elif price < last_price:
+                last_price     = price
+                last_pivot_idx = i
+
+    s = suffix
+    df[f"high_pivot{s}"]     = high_pivot
+    df[f"low_pivot{s}"]      = low_pivot
+    df[f"high_pivot_atr{s}"] = high_pivot_atr
+    df[f"low_pivot_atr{s}"]  = low_pivot_atr
+    df[f"high_confirmed{s}"] = high_confirmed
+    df[f"low_confirmed{s}"]  = low_confirmed
+    df[f"pivot_bars_ago{s}"] = pivot_bars_ago
+
+    # Forward fill
+    df[f"high_pivot_ff{s}"]     = df[f"high_pivot{s}"].ffill()
+    df[f"low_pivot_ff{s}"]      = df[f"low_pivot{s}"].ffill()
+    df[f"high_pivot_atr_ff{s}"] = df[f"high_pivot_atr{s}"].ffill()
+    df[f"low_pivot_atr_ff{s}"]  = df[f"low_pivot_atr{s}"].ffill()
+
+    for base, col in [("high_confirmed", f"high_confirmed{s}"), ("low_confirmed", f"low_confirmed{s}")]:
+        tmp = df[col].replace(0, np.nan).ffill()
+        df[f"{col}_ff"] = tmp.fillna(0).astype(int)
+
+    filled = []
+    last_val = last_idx = None
+    for i, v in enumerate(pivot_bars_ago):
+        if v is not None:
+            last_val, last_idx = v, i
+            filled.append(v)
+        elif last_val is not None:
+            filled.append(last_val + (i - last_idx))
+        else:
+            filled.append(None)
+    df[f"pivot_bars_ago_ff{s}"] = filled
+
+    return df
+
+
+# ─── Market Yapısı (HH/HL/LH/LL) ─────────────────────────────────────────────
+
+def add_market_structure(df: pd.DataFrame, suffix: str) -> pd.DataFrame:
+    s = suffix
+    high_ff = f"high_pivot_ff{s}"
+    low_ff  = f"low_pivot_ff{s}"
+
+    df[f"high_structure{s}"] = np.nan
+    df.loc[df[high_ff] < df[high_ff].shift(1), f"high_structure{s}"] = "LH"
+    df.loc[df[high_ff] > df[high_ff].shift(1), f"high_structure{s}"] = "HH"
+    df[f"high_structure{s}"] = df[f"high_structure{s}"].ffill().fillna("HH")
+
+    df[f"low_structure{s}"] = np.nan
+    df.loc[df[low_ff] < df[low_ff].shift(1), f"low_structure{s}"] = "LL"
+    df.loc[df[low_ff] > df[low_ff].shift(1), f"low_structure{s}"] = "HL"
+    df[f"low_structure{s}"] = df[f"low_structure{s}"].ffill().fillna("LL")
+
+    return df
+
+
+# ─── Shift Koşulu Yardımcısı ──────────────────────────────────────────────────
+
+def _shift_ok(df: pd.DataFrame, price_col: str, pivot_col: str, direction: str, n: int = 6) -> pd.Series:
+    """
+    Son n mumun hepsinin pivot_col'un direction tarafında olup olmadığını kontrol eder.
+    direction: 'below' → close < pivot, 'above' → close > pivot
+    """
+    conditions = []
+    for i in range(1, n + 1):
+        if direction == "below":
+            cond = (df[pivot_col].notna() & (df[price_col].shift(i) < df[pivot_col])).fillna(False)
+        else:
+            cond = (df[pivot_col].notna() & (df[price_col].shift(i) > df[pivot_col])).fillna(False)
+        conditions.append(cond)
+    return pd.concat(conditions, axis=1).all(axis=1)
+
+
+# ─── Ana Hesaplama ────────────────────────────────────────────────────────────
+
+def calculate_indicators(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    atr_low, atr_high = ATR_RANGES[symbol]
+
+    # Temel göstergeler
+    df["rsi"]     = calculate_rsi(df)
+    df["atr"]     = calculate_atr(df)
+    df["pct_atr"] = (df["atr"] / df["close"]) * 100
+
+    df["z"]     = calculate_z(df, symbol)
+    df["pct_z"] = (df["z"] / df["close"]) * 100
+
+    # Donchian Kanalları
+    for w in [20, 50]:
+        dc = calculate_donchian(df, w)
+        df[f"dc_upper_{w}"]          = dc["upper"]
+        df[f"dc_lower_{w}"]          = dc["lower"]
+        df[f"dc_middle_{w}"]         = dc["middle"]
+        df[f"dc_position_ratio_{w}"] = (df["close"] - dc["lower"]) / (dc["upper"] - dc["lower"]) * 100
+        df[f"dc_breakout_{w}"]       = df["high"] > dc["upper"]
+        df[f"dc_breakdown_{w}"]      = df["low"]  < dc["lower"]
+
+    # SMA & Trend
+    df["sma_50"]       = calculate_sma(df, 50)
+    df["sma_200"]      = calculate_sma(df, 200)
+    df["trend_50_200"] = np.where(df["sma_50"] > df["sma_200"], "uptrend", "downtrend")
+
+    # Nadaraya-Watson Envelope
+    nw = calculate_nadaraya_watson(df)
+    df[["nw", "nw_upper", "nw_lower"]] = nw
+
+    # ATR ZigZag — sadece _2x (_3x ileride eklenecek)
+    df = calculate_atr_zigzag(df, atr_col="z", atr_mult=1.25, suffix="_2x")
+    df = calculate_atr_zigzag(df, atr_col="z", atr_mult=3.0, suffix="_3x")
+
+    # Market Yapısı
+    df = add_market_structure(df, "_2x")
+    df = add_market_structure(df, "_3x")
+
+    # ATR filtre maskesi
+    atr_ok = (atr_low < df["pct_atr"]) & (df["pct_atr"] < atr_high)
+
+    # Sütun kısayolları
+    hff  = "high_pivot_ff_2x"
+    lff  = "low_pivot_ff_2x"
+    hs   = "high_structure_2x"
+    ls   = "low_structure_2x"
+    hcon = "high_confirmed_2x"
+    lcon = "low_confirmed_2x"
+
+    # Shift koşulları (ortak)
+    long_shift_ok  = _shift_ok(df, "close", hff, "below", n=5)
+    short_shift_ok = _shift_ok(df, "close", lff, "above", n=5)
+
+    # ─── pivot_go_up / pivot_go_down ──────────────────────────────────────────
+    # Pivot teyidi + yapı uyumu + NW filtresi + trend filtresi
+
+    df["pivot_go_up_2x"]   = False
+    df["pivot_go_down_2x"] = False
+
+    df.loc[
+        df[lcon].astype(bool) &
+        (df[ls] == "HL") & (df[hs] == "HH") &
+        (df["trend_50_200"] == "uptrend") &
+        (df["close"] < df["nw_upper"]) & atr_ok,
+        "pivot_go_up_2x",
+    ] = True
+
+    df.loc[
+        df[hcon].astype(bool) &
+        (df[hs] == "LH") & (df[ls] == "LL") &
+        (df["trend_50_200"] == "downtrend") &
+        (df["close"] > df["nw_lower"]) & atr_ok,
+        "pivot_go_down_2x",
+    ] = True
+
+    # _3x versiyonu (mevcut, dokunulmadı)
+    df["pivot_go_up_3x"]   = False
+    df["pivot_go_down_3x"] = False
+
+    df.loc[
+        df["low_confirmed_3x"].astype(bool) &
+        (df["low_structure_3x"]  == "HL") &
+        (df["high_structure_3x"] == "HH") &
+        (df["close"] < df["nw_upper"]) & atr_ok,
+        "pivot_go_up_3x",
+    ] = True
+
+    df.loc[
+        df["high_confirmed_3x"].astype(bool) &
+        (df["high_structure_3x"] == "LH") &
+        (df["low_structure_3x"]  == "LL") &
+        (df["close"] > df["nw_lower"]) & atr_ok,
+        "pivot_go_down_3x",
+    ] = True
+
+    # ─── pivot_go_breakout / pivot_go_breakdown ───────────────────────────────
+    # HL yapısı var ama HH yok — erken geçiş / zayıf yapı breakout'u
+
+    df["pivot_go_breakout_2x"]  = False
+    df["pivot_go_breakdown_2x"] = False
+
+    df.loc[
+        df[lcon].astype(bool) &
+        (df[ls] == "HL") & (df[hs] != "HH") &
+        df[hff].notna() & (df["close"] > df[hff]) & atr_ok,
+        "pivot_go_breakout_2x",
+    ] = True
+
+    df.loc[
+        df[hcon].astype(bool) &
+        (df[hs] == "LH") & (df[ls] != "LL") &
+        df[lff].notna() & (df["close"] < df[lff]) & atr_ok,
+        "pivot_go_breakdown_2x",
+    ] = True
+
+    # Secondary (shift teyitli)
+    df.loc[
+        (df[ls] == "HL") & long_shift_ok &
+        (df[hs] != "HH") & df[hff].notna() &
+        (df["close"] > df[hff]) & atr_ok &
+        (~df["pivot_go_breakout_2x"]),
+        "pivot_go_breakout_2x",
+    ] = True
+
+    df.loc[
+        (df[ls] != "LL") & short_shift_ok &
+        (df[hs] == "LH") & df[lff].notna() &
+        (df["close"] < df[lff]) & atr_ok &
+        (~df["pivot_go_breakdown_2x"]),
+        "pivot_go_breakdown_2x",
+    ] = True
+
+    # _3x (mevcut, dokunulmadı)
+    df["pivot_go_breakout_3x"]  = False
+    df["pivot_go_breakdown_3x"] = False
+
+    df.loc[
+        df["low_confirmed_3x"].astype(bool) &
+        (df["low_structure_3x"]  == "HL") &
+        (df["high_structure_3x"] != "HH") &
+        df["high_pivot_ff_3x"].notna() &
+        (df["close"] > df["high_pivot_ff_3x"]) & atr_ok,
+        "pivot_go_breakout_3x",
+    ] = True
+
+    df.loc[
+        df["high_confirmed_3x"].astype(bool) &
+        (df["high_structure_3x"] == "LH") &
+        (df["low_structure_3x"]  != "LL") &
+        df["low_pivot_ff_3x"].notna() &
+        (df["close"] < df["low_pivot_ff_3x"]) & atr_ok,
+        "pivot_go_breakdown_3x",
+    ] = True
+
+    # ─── pivot_goup_breakout / pivot_goup_breakdown ───────────────────────────
+    # HL + HH yapısı teyitli breakout — en güçlü sinyal
+
+    df["pivot_goup_breakout_2x"]  = False
+    df["pivot_goup_breakdown_2x"] = False
+
+    df.loc[
+        df[lcon].astype(bool) &
+        (df[ls] == "HL") & (df[hs] == "HH") &
+        df[hff].notna() & (df["close"] > df[hff]) & atr_ok,
+        "pivot_goup_breakout_2x",
+    ] = True
+
+    df.loc[
+        df[hcon].astype(bool) &
+        (df[hs] == "LH") & (df[ls] == "LL") &
+        df[lff].notna() & (df["close"] < df[lff]) & atr_ok,
+        "pivot_goup_breakdown_2x",
+    ] = True
+
+    # Secondary (shift teyitli)
+    df.loc[
+        (df[ls] == "HL") & long_shift_ok &
+        (df[hs] == "HH") & df[hff].notna() &
+        (df["close"] > df[hff]) & atr_ok &
+        (~df["pivot_goup_breakout_2x"]),
+        "pivot_goup_breakout_2x",
+    ] = True
+
+    df.loc[
+        (df[ls] == "LL") & short_shift_ok &
+        (df[hs] == "LH") & df[lff].notna() &
+        (df["close"] < df[lff]) & atr_ok &
+        (~df["pivot_goup_breakdown_2x"]),
+        "pivot_goup_breakdown_2x",
+    ] = True
+
+    # ─── pivot_choch_breakout / pivot_choch_breakdown ─────────────────────────
+    # Change of Character: downtrend yapısından (LL+LH) yukarı kırılım
+    # veya uptrend yapısından (HL+HH) aşağı kırılım
+
+    df["pivot_choch_breakout_2x"]  = False
+    df["pivot_choch_breakdown_2x"] = False
+
+    df.loc[
+        df[lcon].astype(bool) &
+        (df[ls] == "LL") & (df[hs] == "LH") &
+        df[hff].notna() & (df["close"] > df[hff]) & atr_ok,
+        "pivot_choch_breakout_2x",
+    ] = True
+
+    df.loc[
+        df[hcon].astype(bool) &
+        (df[hs] == "HH") & (df[ls] == "HL") &
+        df[lff].notna() & (df["close"] < df[lff]) & atr_ok,
+        "pivot_choch_breakdown_2x",
+    ] = True
+
+    # Secondary (shift teyitli)
+    df.loc[
+        (df[ls] == "LL") & long_shift_ok &
+        (df[hs] == "LH") & df[hff].notna() &
+        (df["close"] > df[hff]) & atr_ok &
+        (~df["pivot_choch_breakout_2x"]),
+        "pivot_choch_breakout_2x",
+    ] = True
+
+    df.loc[
+        (df[ls] == "HL") & short_shift_ok &
+        (df[hs] == "HH") & df[lff].notna() &
+        (df["close"] < df[lff]) & atr_ok &
+        (~df["pivot_choch_breakdown_2x"]),
+        "pivot_choch_breakdown_2x",
+    ] = True
+
+    # ─── pivot_hhll_breakout / pivot_hhll_breakdown ───────────────────────────
+    # Karışık yapı: HH + LL veya HL + HH — trend henüz net değil
+
+    df["pivot_hhll_breakout_2x"]  = False
+    df["pivot_hhll_breakdown_2x"] = False
+
+    df.loc[
+        df[lcon].astype(bool) &
+        (df[ls] == "LL") & (df[hs] == "HH") &
+        df[hff].notna() & (df["close"] > df[hff]) & atr_ok,
+        "pivot_hhll_breakout_2x",
+    ] = True
+
+    df.loc[
+        df[hcon].astype(bool) &
+        (df[hs] == "HH") & (df[ls] == "LL") &
+        df[lff].notna() & (df["close"] < df[lff]) & atr_ok,
+        "pivot_hhll_breakdown_2x",
+    ] = True
+
+    # Secondary (shift teyitli)
+    df.loc[
+        (df[ls] == "LL") & long_shift_ok &
+        (df[hs] == "HH") & df[hff].notna() &
+        (df["close"] > df[hff]) & atr_ok &
+        (~df["pivot_hhll_breakout_2x"]),
+        "pivot_hhll_breakout_2x",
+    ] = True
+
+    df.loc[
+        (df[ls] == "LL") & short_shift_ok &
+        (df[hs] == "HH") & df[lff].notna() &
+        (df["close"] < df[lff]) & atr_ok &
+        (~df["pivot_hhll_breakdown_2x"]),
+        "pivot_hhll_breakdown_2x",
+    ] = True
+
+    # ─── pivot_breakout / pivot_breakdown ─────────────────────────────────────
+    # Yapı koşulu yok — sadece pivot teyidi + fiyat kırılımı
+
+    df["pivot_breakout_2x"]  = False
+    df["pivot_breakdown_2x"] = False
+
+    df.loc[
+        df[lcon].astype(bool) &
+        df[hff].notna() & (df["close"] > df[hff]) & atr_ok,
+        "pivot_breakout_2x",
+    ] = True
+
+    df.loc[
+        df[hcon].astype(bool) &
+        df[lff].notna() & (df["close"] < df[lff]) & atr_ok,
+        "pivot_breakdown_2x",
+    ] = True
+
+    # Secondary (shift teyitli)
+    df.loc[
+        long_shift_ok & df[hff].notna() &
+        (df["close"] > df[hff]) & atr_ok &
+        (~df["pivot_breakout_2x"]),
+        "pivot_breakout_2x",
+    ] = True
+
+    df.loc[
+        short_shift_ok & df[lff].notna() &
+        (df["close"] < df[lff]) & atr_ok &
+        (~df["pivot_breakdown_2x"]),
+        "pivot_breakdown_2x",
+    ] = True
+
+    # ─── pivot_no_goup_breakout / pivot_no_goup_breakdown ─────────────────────
+    # pivot_breakout var ama pivot_goup_breakout yok — zayıf yapılı kırılımlar
+
+    df["pivot_no_goup_breakout_2x"]  = (df["pivot_breakout_2x"]  == True) & (df["pivot_goup_breakout_2x"]  == False)
+    df["pivot_no_goup_breakdown_2x"] = (df["pivot_breakdown_2x"] == True) & (df["pivot_goup_breakdown_2x"] == False)
+
+    return df
